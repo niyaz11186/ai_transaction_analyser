@@ -38,6 +38,11 @@ def load_excel(file_path: str) -> pd.DataFrame:
     if missing_columns:
         raise ValueError(f"Missing required columns: {missing_columns}")
     
+    # Note: Extra columns beyond the required ones will be preserved in the output
+    extra_columns = [col for col in df.columns if col not in required_columns]
+    if extra_columns:
+        print(f"Note: Found {len(extra_columns)} additional column(s) that will be preserved: {', '.join(extra_columns[:5])}{'...' if len(extra_columns) > 5 else ''}")
+    
     return df
 
 
