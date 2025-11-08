@@ -42,7 +42,20 @@ For each transaction:
    - Be concise, but descriptive (1–3 words).
    - Use consistent naming for similar transactions (e.g., always use "Fuel" not "Petrol" or "Gas")
 
-3. Provide a confidence score (High / Medium / Low) for how sure you are of the classification.
+3. Assign a subcategory (more specific classification) when applicable:
+   - Subcategory provides granular detail within the main category.
+   - Examples:
+     * "Food & Beverage" → subcategories: "Food", "Beverage", "Snacks", "Restaurant"
+     * "Travel" → subcategories: "Train", "Flight", "Bus", "Cab", "Metro", "Auto"
+     * "Groceries" → subcategories: "Ration", "Vegetables", "Fruits", "Dairy", "Meat", "Grains"
+     * "Fuel" → subcategories: "Petrol", "Diesel"
+     * "Utilities" → subcategories: "Electricity", "Water", "Internet", "Mobile"
+     * "Medical" → subcategories: "Doctor", "Medicine", "Hospital", "Pharmacy"
+   - If a transaction doesn't need subcategorization (e.g., "Salary", "Refund", "Cash Withdrawal"), 
+     leave subcategory as empty string "".
+   - Be specific and consistent with subcategory naming.
+
+4. Provide a confidence score (High / Medium / Low) for how sure you are of the classification.
 
 Guidelines for intelligent inference:
 - Use context clues like vendor names, UPI handles, keywords (Amazon, Airtel, IRCTC, Paytm, etc.), and transaction amounts.
@@ -54,24 +67,31 @@ Guidelines for intelligent inference:
 - For expenses: be specific (e.g., "Groceries" vs "Food & Beverage" vs "Fuel")
 
 Output Format:
-You must respond with a JSON object containing exactly two fields:
+You must respond with a JSON object containing exactly three fields:
 {
     "category": "Category name (1-3 words, concise and descriptive)",
+    "subcategory": "Subcategory name (more specific, leave empty string \"\" if not applicable)",
     "confidence": "High" or "Medium" or "Low"
 }
 
 Examples:
 Input: Transaction Remarks="Petrol purchase for car", Withdrawal Amount(INR)=1000, Deposit Amount(INR)=0
-Output: {"category": "Fuel", "confidence": "High"}
+Output: {"category": "Fuel", "subcategory": "Petrol", "confidence": "High"}
+
+Input: Transaction Remarks="IRCTC railway ticket booking", Withdrawal Amount(INR)=500, Deposit Amount(INR)=0
+Output: {"category": "Travel", "subcategory": "Train", "confidence": "High"}
+
+Input: Transaction Remarks="Coffee and snacks at cafe", Withdrawal Amount(INR)=200, Deposit Amount(INR)=0
+Output: {"category": "Food & Beverage", "subcategory": "Beverage", "confidence": "High"}
 
 Input: Transaction Remarks="Temporary reversal (refund back to Kotak Mahindra account)", Withdrawal Amount(INR)=0, Deposit Amount(INR)=800
-Output: {"category": "Refund", "confidence": "High"}
+Output: {"category": "Refund", "subcategory": "", "confidence": "High"}
 
 Input: Transaction Remarks="Savings October transfer to Kotak Mahindra account", Withdrawal Amount(INR)=16500, Deposit Amount(INR)=0
-Output: {"category": "Savings Transfer", "confidence": "High"}
+Output: {"category": "Savings Transfer", "subcategory": "", "confidence": "High"}
 
 Input: Transaction Remarks="UPI payment to unknown vendor", Withdrawal Amount(INR)=250, Deposit Amount(INR)=0
-Output: {"category": "Unclear", "confidence": "Low"}
+Output: {"category": "Unclear", "subcategory": "", "confidence": "Low"}
 
 Remember: Always respond with valid JSON only, no additional text before or after."""
 
@@ -92,7 +112,7 @@ Remember: Always respond with valid JSON only, no additional text before or afte
             df: DataFrame with transaction data (should have 'Cleaned Remark' column)
             
         Returns:
-            DataFrame with added 'Category' and 'Confidence' columns
+            DataFrame with added 'Category', 'Subcategory', and 'Confidence' columns
         """
         # Determine which description column to use
         if 'Cleaned Remark' in df.columns:
@@ -103,6 +123,7 @@ Remember: Always respond with valid JSON only, no additional text before or afte
             raise ValueError("DataFrame must contain 'Cleaned Remark' or 'Transaction Remarks' column")
         
         categories = []
+        subcategories = []
         confidences = []
         
         total_rows = len(df)
@@ -115,12 +136,14 @@ Remember: Always respond with valid JSON only, no additional text before or afte
             
             if not description.strip():
                 categories.append("Unclear")
+                subcategories.append("")
                 confidences.append("Low")
                 continue
             
             try:
                 result = self.categorize_single_transaction(description, withdrawal, deposit)
                 categories.append(result['category'])
+                subcategories.append(result.get('subcategory', ''))
                 confidences.append(result['confidence'])
                 
                 # Progress indicator
@@ -130,12 +153,14 @@ Remember: Always respond with valid JSON only, no additional text before or afte
             except Exception as e:
                 print(f"\n  Warning: Error categorizing transaction at row {idx + 1}: {str(e)}")
                 categories.append("Unclear")
+                subcategories.append("")
                 confidences.append("Low")
         
         print()  # New line after progress
         
         # Add columns
         df['Category'] = categories
+        df['Subcategory'] = subcategories
         df['Confidence'] = confidences
         
         return df
@@ -155,7 +180,7 @@ Remember: Always respond with valid JSON only, no additional text before or afte
             deposit: Deposit amount (INR)
             
         Returns:
-            Dictionary with 'category' and 'confidence' keys
+            Dictionary with 'category', 'subcategory', and 'confidence' keys
         """
         user_prompt = f"""Analyze and categorize this transaction:
 
@@ -163,14 +188,14 @@ Transaction Remarks: {cleaned_remark}
 Withdrawal Amount(INR): ₹{withdrawal:,.2f}
 Deposit Amount(INR): ₹{deposit:,.2f}
 
-Respond with JSON only: {{"category": "...", "confidence": "..."}}"""
+Respond with JSON only: {{"category": "...", "subcategory": "...", "confidence": "..."}}"""
         
         response = None
         try:
             response = self.llm_client.invoke(user_prompt, self.SYSTEM_PROMPT)
             
             # Extract JSON from response
-            json_match = re.search(r'\{[^{}]*"category"[^{}]*"confidence"[^{}]*\}', response, re.DOTALL)
+            json_match = re.search(r'\{[^{}]*"category"[^{}]*"subcategory"[^{}]*"confidence"[^{}]*\}', response, re.DOTALL)
             if json_match:
                 json_str = json_match.group(0)
             else:
@@ -186,6 +211,7 @@ Respond with JSON only: {{"category": "...", "confidence": "..."}}"""
             
             # Validate and extract fields
             category = result.get('category', 'Unclear').strip()
+            subcategory = result.get('subcategory', '').strip()
             confidence = result.get('confidence', 'Low').strip()
             
             # Validate confidence value
@@ -196,8 +222,13 @@ Respond with JSON only: {{"category": "...", "confidence": "..."}}"""
             if not category:
                 category = 'Unclear'
             
+            # Subcategory can be empty, so just ensure it's a string
+            if subcategory is None:
+                subcategory = ''
+            
             return {
                 'category': category,
+                'subcategory': subcategory,
                 'confidence': confidence
             }
             
@@ -216,11 +247,13 @@ Respond with JSON only: {{"category": "...", "confidence": "..."}}"""
             
             return {
                 'category': fallback_category,
+                'subcategory': '',
                 'confidence': 'Low'
             }
         except Exception as e:
             return {
                 'category': 'Unclear',
+                'subcategory': '',
                 'confidence': 'Low'
             }
 

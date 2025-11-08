@@ -76,14 +76,24 @@ def get_summary_stats(df: pd.DataFrame) -> dict:
     
     # Check for Category column (case-insensitive)
     category_col = None
+    subcategory_col = None
     for col in df.columns:
         if col.lower() == 'category':
             category_col = col
-            break
+        elif col.lower() == 'subcategory':
+            subcategory_col = col
     
     if category_col:
         stats['categories_found'] = df[category_col].nunique()
         stats['category_breakdown'] = df[category_col].value_counts().to_dict()
+    
+    # Add subcategory breakdown if available
+    if subcategory_col:
+        # Only count non-empty subcategories
+        non_empty_subcats = df[df[subcategory_col].astype(str).str.strip() != '']
+        if len(non_empty_subcats) > 0:
+            stats['subcategories_found'] = non_empty_subcats[subcategory_col].nunique()
+            stats['subcategory_breakdown'] = non_empty_subcats[subcategory_col].value_counts().to_dict()
     
     return stats
 
@@ -108,6 +118,13 @@ def print_summary_stats(stats: dict) -> None:
             print("\nCategory Breakdown:")
             for category, count in stats['category_breakdown'].items():
                 print(f"  - {category}: {count}")
+    
+    if 'subcategories_found' in stats:
+        print(f"\nSubcategories Found: {stats['subcategories_found']}")
+        if 'subcategory_breakdown' in stats and stats['subcategory_breakdown']:
+            print("\nSubcategory Breakdown:")
+            for subcategory, count in stats['subcategory_breakdown'].items():
+                print(f"  - {subcategory}: {count}")
     
     print("="*50 + "\n")
 
