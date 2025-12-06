@@ -1,7 +1,13 @@
 """LLM client wrapper for LangChain and Ollama integration."""
 
-from langchain_community.llms import Ollama
-from langchain_community.chat_models import ChatOllama
+try:
+    # Try new langchain-ollama package first
+    from langchain_ollama import ChatOllama, OllamaLLM
+except ImportError:
+    # Fallback to deprecated langchain-community imports
+    from langchain_community.chat_models import ChatOllama
+    from langchain_community.llms import Ollama as OllamaLLM
+
 from langchain_core.messages import HumanMessage, SystemMessage
 from config.settings import Settings
 from typing import Optional
@@ -31,7 +37,7 @@ class LLMClient:
         )
         
         # Initialize regular Ollama for simple completions
-        self.llm = Ollama(
+        self.llm = OllamaLLM(
             model=self.model_name,
             base_url=self.base_url,
             temperature=Settings.TEMPERATURE
@@ -69,4 +75,25 @@ class LLMClient:
             LLM response string
         """
         return self.llm.invoke(prompt)
+    
+    async def ainvoke(self, prompt: str, system_prompt: Optional[str] = None) -> str:
+        """
+        Async invoke the LLM with a prompt.
+        
+        Args:
+            prompt: User prompt/question
+            system_prompt: Optional system prompt for context
+            
+        Returns:
+            LLM response string
+        """
+        messages = []
+        
+        if system_prompt:
+            messages.append(SystemMessage(content=system_prompt))
+        
+        messages.append(HumanMessage(content=prompt))
+        
+        response = await self.chat_model.ainvoke(messages)
+        return response.content
 

@@ -2,6 +2,7 @@
 
 import sys
 import argparse
+import asyncio
 from pathlib import Path
 
 from utils.file_handler import load_excel, save_csv, get_summary_stats, print_summary_stats
@@ -12,9 +13,9 @@ from chat.interface import ChatInterface
 from config.settings import Settings
 
 
-def process_transactions(input_file: str, output_file: str) -> None:
+async def process_transactions(input_file: str, output_file: str) -> None:
     """
-    Process transactions: normalize remarks and categorize.
+    Process transactions: normalize remarks and categorize (async with parallel processing).
     
     Args:
         input_file: Path to input Excel file
@@ -27,18 +28,19 @@ def process_transactions(input_file: str, output_file: str) -> None:
     # Initialize LLM client
     print("Initializing LLM client...")
     llm_client = LLMClient()
-    print(f"Connected to Ollama model: {Settings.get_model_name()}\n")
+    print(f"Connected to Ollama model: {Settings.get_model_name()}")
+    print(f"Using parallel processing with max {Settings.get_max_workers()} workers\n")
     
-    # Process with Transaction Remark Expert
+    # Process with Transaction Remark Expert (async)
     print("Processing transaction remarks...")
     remark_expert = TransactionRemarkExpert(llm_client)
-    df = remark_expert.process_remarks(df)
+    df = await remark_expert.process_remarks(df)
     print("Transaction remarks processed.\n")
     
-    # Process with Data Categorizer
+    # Process with Data Categorizer (async)
     print("Categorizing transactions...")
     categorizer = DataCategorizer(llm_client)
-    df = categorizer.categorize_transactions(df)
+    df = await categorizer.categorize_transactions(df)
     print("Transactions categorized.\n")
     
     # Save processed data
@@ -88,8 +90,8 @@ def main():
         output_file = str(input_path.with_suffix('.csv'))
     
     try:
-        # Process transactions
-        df = process_transactions(str(input_path), output_file)
+        # Process transactions (async)
+        df = asyncio.run(process_transactions(str(input_path), output_file))
         
         # Initialize chat interface
         print("\n" + "="*50)
@@ -101,7 +103,11 @@ def main():
         chat.start_chat()
         
     except Exception as e:
+        import traceback
         print(f"\nError: {str(e)}")
+        print(f"Error type: {type(e).__name__}")
+        print("\nFull traceback:")
+        traceback.print_exc()
         sys.exit(1)
 
 

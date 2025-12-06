@@ -1,9 +1,11 @@
 """Data Categorizer - Categorizes transactions based on cleaned remarks."""
 
-from typing import Dict
+from typing import Dict, Tuple
 import pandas as pd
 import json
 import re
+import asyncio
+from config.settings import Settings
 
 
 class DataCategorizer:
@@ -103,10 +105,11 @@ Remember: Always respond with valid JSON only, no additional text before or afte
             llm_client: LLM client instance for categorization
         """
         self.llm_client = llm_client
+        self.max_workers = Settings.get_max_workers()
     
-    def categorize_transactions(self, df: pd.DataFrame) -> pd.DataFrame:
+    async def categorize_transactions(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Categorize transactions based on cleaned remarks.
+        Categorize transactions based on cleaned remarks (async with parallel processing).
         
         Args:
             df: DataFrame with transaction data (should have 'Cleaned Remark' column)
@@ -122,39 +125,88 @@ Remember: Always respond with valid JSON only, no additional text before or afte
         else:
             raise ValueError("DataFrame must contain 'Cleaned Remark' or 'Transaction Remarks' column")
         
-        categories = []
-        subcategories = []
-        confidences = []
-        
         total_rows = len(df)
-        print(f"Categorizing {total_rows} transactions...")
+        print(f"Categorizing {total_rows} transactions (parallel, max {self.max_workers} workers)...")
         
-        for idx, row in df.iterrows():
+        # Create semaphore to limit concurrent requests
+        semaphore = asyncio.Semaphore(self.max_workers)
+        
+        # Track progress
+        completed = {'count': 0}
+        lock = asyncio.Lock()
+        
+        async def update_progress():
+            async with lock:
+                completed['count'] += 1
+                count = completed['count']
+                if count % 10 == 0 or count == total_rows:
+                    print(f"  Categorized {count}/{total_rows} transactions...", end='\r')
+        
+        async def process_single_row(idx: int, row: pd.Series) -> Tuple[int, Dict[str, str]]:
+            """Process a single row with concurrency control."""
             description = str(row[desc_column]) if pd.notna(row[desc_column]) else ""
             withdrawal = float(row.get('Withdrawal Amount(INR)', 0) or 0)
             deposit = float(row.get('Deposit Amount(INR)', 0) or 0)
             
             if not description.strip():
-                categories.append("Unclear")
-                subcategories.append("")
-                confidences.append("Low")
-                continue
+                await update_progress()
+                return (idx, {'category': 'Unclear', 'subcategory': '', 'confidence': 'Low'})
             
-            try:
-                result = self.categorize_single_transaction(description, withdrawal, deposit)
-                categories.append(result['category'])
-                subcategories.append(result.get('subcategory', ''))
-                confidences.append(result['confidence'])
-                
-                # Progress indicator
-                if (idx + 1) % 10 == 0 or (idx + 1) == total_rows:
-                    print(f"  Categorized {idx + 1}/{total_rows} transactions...", end='\r')
-                    
-            except Exception as e:
-                print(f"\n  Warning: Error categorizing transaction at row {idx + 1}: {str(e)}")
-                categories.append("Unclear")
-                subcategories.append("")
-                confidences.append("Low")
+            async with semaphore:  # Limit concurrent requests
+                try:
+                    result = await self.categorize_single_transaction(description, withdrawal, deposit)
+                    await update_progress()
+                    return (idx, result)
+                except Exception as e:
+                    await update_progress()
+                    return (idx, {'category': 'Unclear', 'subcategory': '', 'confidence': 'Low'})
+        
+        # Create tasks for all rows - use enumerate to track indices
+        tasks = []
+        row_indices = []
+        for idx, row in df.iterrows():
+            row_indices.append(idx)
+            tasks.append(process_single_row(idx, row))
+        
+        # Execute all tasks in parallel with error handling
+        try:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+        except Exception as e:
+            print(f"\n  Fatal error during parallel processing: {str(e)}")
+            raise
+        
+        # Process results and handle exceptions with defensive checks
+        processed_results = []
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                # Exception case - wrap it properly
+                print(f"\n  Warning: Error categorizing row {row_indices[i]}: {str(result)}")
+                processed_results.append((row_indices[i], {'category': 'Unclear', 'subcategory': '', 'confidence': 'Low'}))
+            elif isinstance(result, tuple) and len(result) == 2:
+                # Valid tuple case - use as is
+                processed_results.append(result)
+            else:
+                # Unexpected structure - handle gracefully
+                print(f"\n  Warning: Unexpected result format at row {row_indices[i]}: {type(result)}")
+                processed_results.append((row_indices[i], {'category': 'Unclear', 'subcategory': '', 'confidence': 'Low'}))
+        
+        # Sort results by index to maintain order
+        processed_results.sort(key=lambda x: x[0])
+        
+        # Extract categories, subcategories, and confidences with validation
+        categories = []
+        subcategories = []
+        confidences = []
+        for idx, result_dict in processed_results:
+            if isinstance(result_dict, dict):
+                categories.append(result_dict.get('category', 'Unclear'))
+                subcategories.append(result_dict.get('subcategory', ''))
+                confidences.append(result_dict.get('confidence', 'Low'))
+            else:
+                # Fallback for unexpected structure
+                categories.append('Unclear')
+                subcategories.append('')
+                confidences.append('Low')
         
         print()  # New line after progress
         
@@ -165,14 +217,14 @@ Remember: Always respond with valid JSON only, no additional text before or afte
         
         return df
     
-    def categorize_single_transaction(
+    async def categorize_single_transaction(
         self, 
         cleaned_remark: str, 
         withdrawal: float = 0.0, 
         deposit: float = 0.0
     ) -> Dict[str, str]:
         """
-        Categorize a single transaction.
+        Categorize a single transaction (async).
         
         Args:
             cleaned_remark: Cleaned transaction remark
@@ -192,7 +244,7 @@ Respond with JSON only: {{"category": "...", "subcategory": "...", "confidence":
         
         response = None
         try:
-            response = self.llm_client.invoke(user_prompt, self.SYSTEM_PROMPT)
+            response = await self.llm_client.ainvoke(user_prompt, self.SYSTEM_PROMPT)
             
             # Extract JSON from response
             json_match = re.search(r'\{[^{}]*"category"[^{}]*"subcategory"[^{}]*"confidence"[^{}]*\}', response, re.DOTALL)

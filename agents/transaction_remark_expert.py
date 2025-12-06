@@ -1,9 +1,11 @@
 """Transaction Remark Expert - Normalizes and cleans transaction remarks using LLM."""
 
-from typing import Dict, List
+from typing import Dict, List, Tuple
 import pandas as pd
 import json
 import re
+import asyncio
+from config.settings import Settings
 
 
 class TransactionRemarkExpert:
@@ -61,10 +63,11 @@ Remember: Always respond with valid JSON only, no additional text before or afte
             llm_client: LLM client instance for processing remarks
         """
         self.llm_client = llm_client
+        self.max_workers = Settings.get_max_workers()
     
-    def process_remarks(self, df: pd.DataFrame) -> pd.DataFrame:
+    async def process_remarks(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Process transaction remarks and add cleaned columns.
+        Process transaction remarks and add cleaned columns (async with parallel processing).
         
         Args:
             df: DataFrame with 'Transaction Remarks' column
@@ -75,33 +78,83 @@ Remember: Always respond with valid JSON only, no additional text before or afte
         if 'Transaction Remarks' not in df.columns:
             raise ValueError("DataFrame must contain 'Transaction Remarks' column")
         
-        cleaned_remarks = []
-        notes_doubts = []
-        
         total_rows = len(df)
-        print(f"Processing {total_rows} transaction remarks...")
+        print(f"Processing {total_rows} transaction remarks (parallel, max {self.max_workers} workers)...")
         
-        for idx, row in df.iterrows():
+        # Create semaphore to limit concurrent requests
+        semaphore = asyncio.Semaphore(self.max_workers)
+        
+        # Track progress
+        completed = {'count': 0}
+        lock = asyncio.Lock()
+        
+        async def update_progress():
+            async with lock:
+                completed['count'] += 1
+                count = completed['count']
+                if count % 10 == 0 or count == total_rows:
+                    print(f"  Processed {count}/{total_rows} remarks...", end='\r')
+        
+        async def process_single_row(idx: int, row: pd.Series) -> Tuple[int, Dict[str, str]]:
+            """Process a single row with concurrency control."""
             remark = str(row['Transaction Remarks']) if pd.notna(row['Transaction Remarks']) else ""
             
             if not remark.strip():
-                cleaned_remarks.append("")
-                notes_doubts.append("")
-                continue
+                await update_progress()
+                return (idx, {'cleaned_remark': '', 'notes_doubts': ''})
             
-            try:
-                result = self.normalize_single_remark(remark)
-                cleaned_remarks.append(result['cleaned_remark'])
-                notes_doubts.append(result['notes_doubts'])
-                
-                # Progress indicator
-                if (idx + 1) % 10 == 0 or (idx + 1) == total_rows:
-                    print(f"  Processed {idx + 1}/{total_rows} remarks...", end='\r')
-                    
-            except Exception as e:
-                print(f"\n  Warning: Error processing remark at row {idx + 1}: {str(e)}")
-                cleaned_remarks.append("")
-                notes_doubts.append(f"Error: {str(e)}")
+            async with semaphore:  # Limit concurrent requests
+                try:
+                    result = await self.normalize_single_remark(remark)
+                    await update_progress()
+                    return (idx, result)
+                except Exception as e:
+                    await update_progress()
+                    return (idx, {'cleaned_remark': '', 'notes_doubts': f"Error: {str(e)}"})
+        
+        # Create tasks for all rows - use enumerate to get sequential index
+        tasks = []
+        row_indices = []
+        for idx, row in df.iterrows():
+            row_indices.append(idx)
+            tasks.append(process_single_row(idx, row))
+        
+        # Execute all tasks in parallel with error handling
+        try:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+        except Exception as e:
+            print(f"\n  Fatal error during parallel processing: {str(e)}")
+            raise
+        
+        # Process results and handle exceptions with defensive checks
+        processed_results = []
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                # Exception case - wrap it properly
+                print(f"\n  Warning: Error processing row {row_indices[i]}: {str(result)}")
+                processed_results.append((row_indices[i], {'cleaned_remark': '', 'notes_doubts': f"Error: {str(result)}"}))
+            elif isinstance(result, tuple) and len(result) == 2:
+                # Valid tuple case - use as is
+                processed_results.append(result)
+            else:
+                # Unexpected structure - handle gracefully
+                print(f"\n  Warning: Unexpected result format at row {row_indices[i]}: {type(result)}")
+                processed_results.append((row_indices[i], {'cleaned_remark': '', 'notes_doubts': f"Unexpected result format: {type(result)}"}))
+        
+        # Sort results by index to maintain order
+        processed_results.sort(key=lambda x: x[0])
+        
+        # Extract cleaned remarks and notes with validation
+        cleaned_remarks = []
+        notes_doubts = []
+        for idx, result_dict in processed_results:
+            if isinstance(result_dict, dict):
+                cleaned_remarks.append(result_dict.get('cleaned_remark', ''))
+                notes_doubts.append(result_dict.get('notes_doubts', ''))
+            else:
+                # Fallback for unexpected structure
+                cleaned_remarks.append('')
+                notes_doubts.append(f"Invalid result format: {type(result_dict)}")
         
         print()  # New line after progress
         
@@ -111,9 +164,9 @@ Remember: Always respond with valid JSON only, no additional text before or afte
         
         return df
     
-    def normalize_single_remark(self, remark: str) -> Dict[str, str]:
+    async def normalize_single_remark(self, remark: str) -> Dict[str, str]:
         """
-        Normalize a single transaction remark.
+        Normalize a single transaction remark (async).
         
         Args:
             remark: Raw transaction remark string
@@ -129,7 +182,7 @@ Respond with JSON only: {{"cleaned_remark": "...", "notes_doubts": "..."}}"""
         
         response = None
         try:
-            response = self.llm_client.invoke(user_prompt, self.SYSTEM_PROMPT)
+            response = await self.llm_client.ainvoke(user_prompt, self.SYSTEM_PROMPT)
             
             # Extract JSON from response (handle cases where LLM adds extra text)
             json_match = re.search(r'\{[^{}]*"cleaned_remark"[^{}]*"notes_doubts"[^{}]*\}', response, re.DOTALL)

@@ -18,6 +18,9 @@ class Settings:
     TEMPERATURE: float = float(os.getenv("TEMPERATURE", "0.1"))
     MAX_TOKENS: Optional[int] = None
     
+    # Parallel Processing Configuration
+    MAX_CONCURRENT_WORKERS: int = int(os.getenv("MAX_CONCURRENT_WORKERS", "10"))
+    
     @classmethod
     def get_ollama_url(cls) -> str:
         """Get the Ollama API base URL."""
@@ -27,4 +30,9 @@ class Settings:
     def get_model_name(cls) -> str:
         """Get the Ollama model name."""
         return cls.OLLAMA_MODEL
+    
+    @classmethod
+    def get_max_workers(cls) -> int:
+        """Get the maximum number of concurrent workers for parallel processing."""
+        return cls.MAX_CONCURRENT_WORKERS
 
